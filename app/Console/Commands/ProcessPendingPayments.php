@@ -12,6 +12,13 @@ use App\Models\API_PYMENT;
 use Exception;
 use Carbon\Carbon;
 
+/**
+ * Process Pending Payments Command
+ * معالجة المدفوعات المعلقة
+ * 
+ * This command processes payments that were registered via the API but not yet finalized.
+ * It executes the financial stored procedure for each pending payment and updates their status.
+ */
 class ProcessPendingPayments extends Command
 {
     /**
@@ -39,24 +46,29 @@ class ProcessPendingPayments extends Command
     }
 
     /**
-     * Execute the console command.
+     * Execute the console command
+     * تنفيذ أمر المعالجة
      *
      * @return int
      */
     public function handle()
     {
         $this->info('Starting to process pending payments...');
-         $univs = Universities::where('IS_IT_ENABLE', 1)->get(['UNIV_DB_NAME', 'UNID', 'MINISTRY_ID', 'BRANSH_ID']);
+        
+        // Get all enabled universities
+        $univs = Universities::where('IS_IT_ENABLE', 1)->get(['UNIV_DB_NAME', 'UNID', 'MINISTRY_ID', 'BRANSH_ID']);
         if ($univs->count() > 0) {
             foreach ($univs as $univ) {
-                // Cambiar la conexión de la base de datos
+                // Switch database connection to university's database
                 DB::purge('mysql3');
                 config(['database.connections.mysql3.database' => $univ->UNIV_DB_NAME]);
                 DB::reconnect('mysql3');
                 $this->info("Switched to database: " . $univ->UNIV_DB_NAME);
-              //  \Log::error("Switched to database: " . $univ->UNIV_DB_NAME);
+                
+                // Process regular pending payments (status_flag = 1)
                 $this->processPaymentsForUniversity();
-                // Reprocess failed payments (status 99) for the fixed date 2025-09-22: 01:00 to 09:40
+                
+                // Reprocess failed payments (status 99) for specific time window if needed
                 $start = '2025-09-22 00:00:00';
                 $end = '2025-09-22 09:40:00';
                 $this->processFailedPaymentsForUniversityWindow($start, $end);
@@ -68,75 +80,62 @@ class ProcessPendingPayments extends Command
 
 
     }
+    
+    /**
+     * Process pending payments for current university
+     * معالجة المدفوعات المعلقة للجامعة الحالية
+     * 
+     * Processes all payments with status_flag = 1 (sent to processing)
+     * 
+     * @return int
+     */
     public function processPaymentsForUniversity()
     {
-        try{
-         // Obtener todos los pagos pendientes no procesados
-        $pendingPayments = PendingPayment::on('mysql3')->where('status_flag', 1) // 1: Enviado a procesamiento
-            ->get();
+        try {
+            // Get all pending payments not yet processed (status_flag = 1)
+            $pendingPayments = PendingPayment::on('mysql3')->where('status_flag', 1)
+                ->get();
 
-      //  $this->info("Found {$pendingPayments->count()} pending payments to process");
+            $processed = 0;
+            $errors = 0;
+            $Api_payment = [];
 
-        $processed = 0;
-        $errors = 0;
-        $Api_payment=[];
-
-        foreach ($pendingPayments as $pendingPayment) {
-          //  $this->info("Processing payment ID: {$pendingPayment->api_payment_id}");
-            //\Log::info("Processing payment ID: {$pendingPayment->api_payment_id}");
-            try {
-
-
-
-                // Ejecutar la función financiera
-                        $result = $this->executeFinancialFunction(
-                            $pendingPayment->api_payment_id,
-                            $pendingPayment->payment_key
-                        );
-              //    \Log::info("Payment processed result:{$result}");
-                if ($result==1 && strpos(strtolower($result), 'error') === false) {
-                        // Success - set status to processed
-                        $pendingPayment->update(['status_flag' => 2, 'error_message' => "The result from financial_function_api_send_payment :"]);
-                      
-                    // Éxito - eliminar el registro pendiente
-                    $pendingPayment->update(['status_flag' => 2]);
-                //    $this->info("Payment processed successfully: {$pendingPayment->api_payment_id}");
-                //     \Log::info("Payment processed successfully:{$pendingPayment->api_payment_id}");
-                    $processed++;
-                    array_push($Api_payment,$pendingPayment->api_payment_id);
-                } else {
-                    // Error en el procesamiento
-                    $pendingPayment->status_flag = 99; // 99: Error en procesamiento
-                    $pendingPayment->error_message = $result ?: 'Unknown error';
+            foreach ($pendingPayments as $pendingPayment) {
+                try {
+                    // Execute financial stored procedure
+                    $result = $this->executeFinancialFunction(
+                        $pendingPayment->api_payment_id,
+                        $pendingPayment->payment_key
+                    );
+                    // Check if processing succeeded
+                    if ($result == 1 && strpos(strtolower($result), 'error') === false) {
+                        // Success - mark as processed (status_flag = 2)
+                        $pendingPayment->update(['status_flag' => 2, 'error_message' => 'The result from financial_function_api_send_payment :']);
+                        $processed++;
+                        array_push($Api_payment, $pendingPayment->api_payment_id);
+                    } else {
+                        // Processing error - mark with error status (status_flag = 99)
+                        $pendingPayment->status_flag = 99;
+                        $pendingPayment->error_message = $result ?: 'Unknown error';
+                        $pendingPayment->save();
+                        $errors++;
+                    }
+                } catch (\Throwable $e) {
+                    // Exception during processing - mark with error status
+                    $pendingPayment->status_flag = 99;
+                    $pendingPayment->error_message = $e->getMessage();
                     $pendingPayment->save();
-
-                //    $this->error("Error processing payment {$pendingPayment->api_payment_id}: {$pendingPayment->error_message}");
-                  //  \Log::info("Error processing payment:{$pendingPayment->api_payment_id}");
                     $errors++;
                 }
-            } catch (\Throwable $e) {
-                // Error en el procesamiento
-                $pendingPayment->status_flag = 99; // 99: Error en procesamiento
-                $pendingPayment->error_message = $e->getMessage();
-                $pendingPayment->save();
-
-            //    $this->error("Exception processing payment {$pendingPayment->api_payment_id}: {$e->getMessage()}");
-               //  \Log::info("Exception processing paymen {$pendingPayment->api_payment_id}: {$e->getMessage()}");
-                $errors++;
-
-               // Log::error("Payment processing error in cron job: " . $e->getMessage());
-
             }
+            
+            // Update PAYMENT_FLAG for all successfully processed payments
+            API_PYMENT::on('mysql3')->whereIn('API_PAYMENT_ID', $Api_payment)->update(['PAYMENT_FLAG' => 1]);
+            return 0;
+        } catch (Exception $e) {
+            Log::error("Payment processing error in cron job: " . $e->getMessage());
+            return 0;
         }
-        API_PYMENT::on('mysql3')->whereIn('API_PAYMENT_ID', $Api_payment)->update(['PAYMENT_FLAG'=>1]);
-      //  $this->info("Finished processing pending payments. Processed: {$processed}, Errors: {$errors}");
-         // Log::error("Finished processing pending payments. Processed: {$processed}, Errors: {$errors}");
-
-        return 0;
-    }catch(Exception $e){
-        Log::error("Payment processing error in cron job: " . $e->getMessage());
-         return 0;
-    }
     }
 
     /**
@@ -236,14 +235,14 @@ class ProcessPendingPayments extends Command
 
     /**
      * Execute financial function for payment
+     * تنفيذ الدالة المالية للدفع
      *
-     * @param int $paymentId
-     * @param string $key
-     * @return mixed
+     * @param int $paymentId API_PAYMENT_ID
+     * @param string $key Payment key from financial validation
+     * @return mixed Result from stored procedure (1 = success, or error message)
      */
     private function executeFinancialFunction(int $paymentId, string $key)
     {
-       //   $this->info("executeFinancialFunction : {$paymentId}");
         return optional(collect(DB::connection('mysql3')->select(
             'SELECT financial_function_api_send_payment(?,?) as msg',
             [

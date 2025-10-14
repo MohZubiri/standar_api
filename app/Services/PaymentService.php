@@ -20,21 +20,29 @@ class PaymentService
 {
     /**
      * Process invoice payment
+     * معالجة دفع الفاتورة والتحقق من صحتها
      *
-     * @param array $paymentData Payment data including invoice ID, bonds ID, etc.
-     * @param string $connectionDriver Database connection driver
-     * @param int $bankId Bank ID
-     * @return array Response with status and data
+     * @param array $paymentData بيانات الدفع (invoice_id, faculty_id, program_id, student_id, invoice_cost)
+     * @param array $parameters معاملات الاتصال (connectionDriver, univ_id, etc.)
+     * @param int $bankId معرف البنك
+     * @param array $extrnalDataPayment بيانات الدفع الخارجية (bonds_id, bonds_date, payment_by, payment_amount, key)
+     * @return array ['status' => 'success'|'error', 'code' => string, 'message' => string, 'data' => array, 'api_payment_id' => int|null]
      */
 
-    public function validateProcesspayment($paymentData ,$extrnalDataPayment){
+    /**
+     * Validate payment processing requirements
+     * التحقق من صحة متطلبات معالجة الدفع
+     *
+     * @param array $paymentData بيانات الدفع
+     * @param array $extrnalDataPayment بيانات الدفع الخارجية
+     * @return array|true true إذا كان التحقق ناجحاً، أو array مع تفاصيل الخطأ
+     */
+    public function validateProcesspayment($paymentData, $extrnalDataPayment)
+    {
+        // Get invoice details
+        $invoice = $this->getInvoice($this->getshortinvoice($paymentData['invoice_id']));
 
-         $invoice = $this->getInvoice($this->getshortinvoice($paymentData['invoice_id']));
-
-
-
-
-            // Check if invoice exists
+        // Check if invoice exists
          if (!$invoice) {
                 return ['status' => 'error', 'code' => '#504', 'message' => 'Invoice not found'];
             }
@@ -76,39 +84,41 @@ class PaymentService
                 return ['status' => 'error', 'code' => '#518', 'message' => 'Invalid bonds date'];
             }
 
-            return true;
+        return true;
     }
-    public function processPayment(array $paymentData,$parameters, int $bankId,$extrnalDataPayment): array
+    public function processPayment(array $paymentData, $parameters, int $bankId, $extrnalDataPayment): array
     {
         try {
-
-            $connectionDriver= $parameters['connectionDriver'];
+            // Extract connection driver from parameters
+            $connectionDriver = $parameters['connectionDriver'];
 
             // Setup database connection
             $this->setupDatabaseConnection($connectionDriver);
-            $validatePayment = $this->validateProcesspayment($paymentData,$extrnalDataPayment);
-            // Get invoice details
-
+            
+            // Validate payment data
+            $validatePayment = $this->validateProcesspayment($paymentData, $extrnalDataPayment);
             if ($validatePayment !== true) {
                 return $validatePayment;
             }
 
-            // Create payment record
+            // Create payment record in database
             $payment = $this->createPaymentRecord($paymentData, $bankId, $extrnalDataPayment);
+            
             if ($payment['status'] === 'error') {
                 return $payment;
             }
+            
             if ($payment['status'] === 'success') {
-                // Retornar éxito inmediatamente después de registrar el pago
-                // El procesamiento real se hará mediante un cron job
+                // Return success immediately after registering payment
+                // Actual processing will be done via cron job
                 return [
                     'status' => 'success',
                     'code' => '#200',
                     'message' => 'Payment registered successfully',
-                'data' => $paymentData,
-                'api_payment_id' => $payment['api_payment_id'] ?? null
-            ];
-        }
+                    'data' => $paymentData,
+                    'api_payment_id' => $payment['api_payment_id'] ?? null
+                ];
+            }
 
         } catch (Exception $e) {
             Log::error("Payment processing error: " . $e->getMessage());
@@ -196,11 +206,12 @@ class PaymentService
 
     /**
      * Create payment record
+     * إنشاء سجل دفع جديد أو استرجاع سجل موجود
      *
-     * @param array $paymentData
-     * @param object $invoice
-     * @param int $bankId
-     * @return API_PYMENT
+     * @param array $paymentData بيانات الدفع (invoice_id, faculty_id, program_id, student_id, invoice_cost)
+     * @param int $bankId معرف البنك
+     * @param array $extrnalDataPayment بيانات الدفع الخارجية (bonds_id, bonds_date, payment_by)
+     * @return array ['status' => 'success'|'error', 'code' => string, 'message' => string, 'api_payment_id' => int|null]
      */
     private function createPaymentRecord(array $paymentData, int $bankId, array $extrnalDataPayment): array
     {
